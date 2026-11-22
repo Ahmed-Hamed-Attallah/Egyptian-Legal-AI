@@ -1,0 +1,185 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "egypt-legal-ai"
+version = "0.1.0"
+description = "An Arabic-first Retrieval-Augmented Generation (RAG) system designed to retrieve, analyze, and explain Egyptian legal documents."
+readme = "README.md"
+requires-python = ">=3.11"
+
+# ==========================================
+# Project Dependencies
+# Keep in sync with requirements.txt (TECH_STACK.md selection policy).
+# ==========================================
+dependencies = [
+    # --- Backend & API ---
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.5.0",
+    "python-dotenv>=1.0.0",          # .env loading in src/config/settings.py
+    "python-multipart>=0.0.12",      # Required for FastAPI file uploads
+    "email-validator>=2.1.0",        # Required by pydantic EmailStr (auth routes)
+    "httpx>=0.27.0",                 # HTTP client for workers/scripts/tests
+
+    # --- Database (Phase 11) ---
+    "sqlalchemy>=2.0.35",
+    "alembic>=1.13.0",
+    "psycopg[binary]>=3.2.0",        # Sync PostgreSQL driver (postgresql+psycopg://)
+
+    # --- Security & Authentication (Phase 12) ---
+    "PyJWT>=2.8.0,<3.0.0",           # JWT issuance/verification. NOT the 'jwt' (python-jwt) package
+    "passlib[bcrypt]>=1.7.4",        # Password hashing framework
+    "bcrypt>=4.0.1,<5.0.0",          # bcrypt 5.x removes __about__ and breaks passlib detection
+
+    # --- Document Processing (Phase 3) ---
+    "pymupdf>=1.24.0",               # Fast PDF extraction
+    "python-docx>=1.1.0",            # DOCX parsing
+    "pandas>=2.2.0",                 # Tabular data handling
+    "beautifulsoup4>=4.12.0",        # HTML parsing
+    "openpyxl>=3.1.0",               # Excel ingestion (parsers/excel_loader.py)
+
+    # --- Retrieval & ML (Phases 6-8) ---
+    "sentence-transformers>=3.2.0",  # Embeddings and Cross-Encoders
+    "qdrant-client>=1.12.0",         # Vector database client
+    "rank-bm25>=0.2.2",              # Sparse retrieval
+    "transformers>=4.45.0",          # Hugging Face models (local LLM fallback)
+    "accelerate>=0.34.0",            # device_map / dtype handling for transformers
+    "torch>=2.4.0",                  # PyTorch (see GPU/CPU note below)
+
+    # --- LLM Providers (Phase 9) ---
+    "groq>=0.11.0",                  # Primary API-based LLM provider
+]
+
+# ==========================================
+# Optional Dependencies (Extras)
+# ==========================================
+[project.optional-dependencies]
+
+# Development, testing, and code quality tools
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+    "coverage>=7.6.0",
+    "pre-commit>=3.8.0",
+    "types-requests>=2.32.0",       # Type stubs for mypy
+    "types-python-dateutil>=2.9.0", # Type stubs for date handling
+]
+
+# OCR capabilities (Optional: subject to hardware and language validation)
+ocr = [
+    "paddlepaddle>=2.6.0",
+    "paddleocr>=2.8.0",
+]
+
+# Additional LLM providers (Optional: install only when the matching API key is set)
+providers = [
+    "openai>=1.50.0",               # OpenAI provider
+    "google-generativeai>=0.8.0",   # Google Gemini provider
+]
+
+# Cache / queue (Optional: Phase 11/15, currently CACHE_ENABLED=false)
+cache = [
+    "redis>=5.0.0",
+]
+
+# NOTE: The frontend is Next.js (web/) and is managed by npm, not Python.
+# torch install flavour for the Quadro P2000 (4 GB VRAM):
+#   CUDA:  pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   CPU:   pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "api*", "workers*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "api", "workers", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort (import sorting)
+    "B",   # flake8-bugbear (common bugs)
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade (modernize syntax)
+]
+ignore = [
+    "E501", # Line too long (let the formatter handle this)
+    "B008", # Do not perform function calls in argument defaults (Required for FastAPI's Depends())
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src", "api", "workers"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+ignore_missing_imports = true # Fallback for all unlisted modules
+
+# Specific overrides for heavy ML libraries that lack type stubs
+[[tool.mypy.overrides]]
+module = [
+    "torch.*",
+    "transformers.*",
+    "sentence_transformers.*",
+    "qdrant_client.*",
+    "pymupdf.*",
+    "rank_bm25.*",
+    "groq.*",
+    "paddleocr.*",
+    "paddle.*",
+    "fitz.*",        # PyMuPDF alternative import
+    "passlib.*",
+    "bcrypt.*",
+    "accelerate.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q --strict-markers"
+testpaths = [
+    "tests",
+]
+# This allows imports like `from src.config...` to work seamlessly in tests
+pythonpath = [".", "src"]
+# Automatically handles async tests (crucial for FastAPI and async DB calls)
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src", "api"]
+omit = [
+    "*/tests/*",
+    "*/migrations/*",
+    "*/__init__.py",
+    "*/config/logging_config.py", # Hard to test logging setup directly
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.",
+    "pass",
+    "raise ImportError",
+]
+fail_under = 80.0
+show_missing = true
+skip_covered = true

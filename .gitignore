@@ -1,0 +1,95 @@
+# =============================================================================
+# Egyptian Legal AI — Root .gitignore (Python backend + shared)
+# =============================================================================
+
+# --- Python bytecode & caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# --- Distribution / packaging ---
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+pip-wheel-metadata/
+
+# --- Virtual environments (conda envs live outside the repo) ---
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# --- Testing & tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.dmypy.json
+dmypy.json
+
+# --- Secrets & environment (NEVER commit) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Runtime data: uploads, corpora, local vector store ---
+data/
+# To track a seed corpus, un-ignore it explicitly, e.g.:
+#   !data/raw/official_laws/
+#   !data/raw/official_laws/**
+
+# --- Generated artifacts (embeddings, models, indexes) ---
+artifacts/
+
+# --- Model weights anywhere in the tree ---
+*.bin
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.pkl
+
+# --- Logs ---
+logs/
+*.log
+
+# --- Generated reports / code audits ---
+reports/
+
+# --- Debug / combined dumps created during troubleshooting ---
+*_Combined.txt
+combined/
+file.txt
+
+# --- Node (safety net; web/ has its own .gitignore) ---
+node_modules/
+
+# --- Jupyter checkpoints (keep the .ipynb files themselves) ---
+.ipynb_checkpoints/
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Local tunnel state ---
+.devtunnel/
+
+*.txt

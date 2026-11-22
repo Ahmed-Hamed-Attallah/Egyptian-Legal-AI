@@ -1,0 +1,70 @@
+# =============================================================================
+# Egyptian Legal AI — .dockerignore (context = repo root)
+# =============================================================================
+
+# --- VCS ---
+.git/
+.gitignore
+.gitattributes
+
+# --- Secrets & env (inject at runtime, never bake into images) ---
+.env
+.env.*
+*.pem
+*.key
+web/.env*
+
+# --- Python caches / packaging ---
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+
+# --- Tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Runtime data & artifacts ---
+data/
+artifacts/
+logs/
+*.log
+
+# --- Node / Next.js (relevant to the frontend image) ---
+web/node_modules/
+web/.next/
+web/out/
+web/build/
+web/coverage/
+web/*.tsbuildinfo
+web/npm-debug.log*
+web/yarn-*.log*
+
+# --- Not needed in runtime images ---
+tests/
+docs/
+reports/
+notebooks/
+*.md
+
+# --- Debug dumps ---
+*_Combined.txt
+combined/
+file.txt
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Compose file itself is not needed inside images ---
+docker-compose.yml
