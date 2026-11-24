@@ -16,10 +16,15 @@ logger = logging.getLogger(__name__)
 class AnswerGenerator:
     """
     Generates legal answers using the provider router.
-    
+
     Supports conversation memory:
     - Short-term: history (prior turns of current conversation)
     - Long-term: memory_digest (compact digest of other conversations)
+
+    Supports two modes:
+    - conversational=False (default): legal RAG — answer from retrieved context.
+    - conversational=True: meta/follow-up — answer from history/memory only,
+      no legal context, no citations.
     """
 
     def __init__(self, provider_router: ProviderRouter, language: str = "ar"):
@@ -34,37 +39,46 @@ class AnswerGenerator:
         max_tokens: int = None,
         history: Optional[List[Dict[str, str]]] = None,
         memory_digest: Optional[List[Dict[str, object]]] = None,
+        conversational: bool = False,
     ) -> GenerationResponse:
         """
         Generate an answer for a legal question with conversation memory.
-        
+
         Args:
             question: The user's question
-            context: Retrieved legal context (chunks)
+            context: Retrieved legal context (chunks). Ignored when conversational.
             temperature: LLM temperature (optional)
             max_tokens: Max tokens to generate (optional)
             history: Short-term memory (prior turns of current conversation)
             memory_digest: Long-term memory (compact digest of other conversations)
+            conversational: True → answer from history/memory only (no citations)
         """
         try:
-            # Build system prompt with memory digest (if any)
-            system_prompt = LegalPromptTemplates.build_system_prompt_with_memory(
-                memory_digest or [],
-                language=self.language,
-            )
+            if conversational:
+                system_prompt = LegalPromptTemplates.build_conversational_system_prompt(
+                    memory_digest or [],
+                    language=self.language,
+                )
+                user_prompt = LegalPromptTemplates.format_conversational_user_prompt(
+                    question,
+                    language=self.language,
+                )
+            else:
+                system_prompt = LegalPromptTemplates.build_system_prompt_with_memory(
+                    memory_digest or [],
+                    language=self.language,
+                )
+                user_prompt = LegalPromptTemplates.format_user_prompt(
+                    question, context, self.language
+                )
 
-            # Build user prompt with question and context
-            user_prompt = LegalPromptTemplates.format_user_prompt(
-                question, context, self.language
-            )
-
-            # Construct the full messages list for the LLM
-            # This is the key: history becomes real turns, not just context
+            # Construct the full messages list for the LLM.
+            # History becomes real turns, not just context.
             messages = [
                 {"role": "system", "content": system_prompt},
             ]
             if history:
-                messages.extend(history)  # Prior user/assistant turns
+                messages.extend(history)
             messages.append(
                 {"role": "user", "content": user_prompt}
             )
@@ -72,7 +86,7 @@ class AnswerGenerator:
             request = GenerationRequest(
                 system_prompt=system_prompt,  # Kept for backward compatibility
                 user_prompt=user_prompt,
-                messages=messages,  # New field: full conversation
+                messages=messages,  # Full conversation
                 temperature=temperature or settings.LLM_TEMPERATURE,
                 max_tokens=max_tokens or settings.LLM_MAX_TOKENS,
             )

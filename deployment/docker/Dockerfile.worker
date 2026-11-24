@@ -1,0 +1,68 @@
+# syntax=docker/dockerfile:1.6
+# =============================================================================
+# Egyptian Legal AI — background ingestion worker
+#
+# Separate image on purpose (PROJECT_ROADMAP Phase 15: non-blocking processing).
+# It shares the src/ tree with the API but runs in its own process, so embedding,
+# chunking and OCR cannot starve HTTP latency.
+#
+# It builds its OWN RAG stack (embedding model + BM25), which costs ~10-30 s at
+# startup and several GB of RAM. Give it its own container rather than doubling
+# WORKER_CONCURRENCY inside the API.
+# =============================================================================
+
+FROM python:3.11-slim-bookworm AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates libglib2.0-0 libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+ARG INSTALL_OCR=0
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.4.0"
+
+COPY requirements.txt pyproject.toml ./
+RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
+
+RUN if [ "$INSTALL_OCR" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends libsm6 libxext6 \
+            && rm -rf /var/lib/apt/lists/* \
+            && pip install "paddlepaddle>=2.6.0" "paddleocr>=2.9.0"; \
+    fi
+
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim-bookworm AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DEBIAN_FRONTEND=noninteractive \
+    HF_HOME=/models SENTENCE_TRANSFORMERS_HOME=/models TRANSFORMERS_CACHE=/models \
+    HUGGINGFACE_HUB_CACHE=/models TOKENIZERS_PARALLELISM=false \
+    OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 \
+    PYTHONPATH=/app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl libglib2.0-0 libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid 10001 mizan && useradd --uid 10001 --gid mizan --create-home mizan
+
+WORKDIR /app
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+COPY --chown=mizan:mizan src ./src
+COPY --chown=mizan:mizan workers ./workers
+COPY --chown=mizan:mizan pyproject.toml requirements.txt ./
+
+# Same uid as the API so both can read/write data/documents and data/jobs.
+RUN mkdir -p /app/data/documents /app/logs /app/artifacts \
+    && chown -R mizan:mizan /app/data /app/logs /app/artifacts /models
+
+USER mizan
+
+# The worker has no HTTP port. Liveness is heartbeat freshness in processing_jobs,
+# reclaimed by WORKER_RECLAIM_STALE_AFTER_SECONDS — so no HEALTHCHECK here.
+CMD ["python", "-m", "workers.ingestion_worker"]

@@ -68,3 +68,11 @@ Thumbs.db
 
 # --- Compose file itself is not needed inside images ---
 docker-compose.yml
+
+# No env file from ANY directory may enter a build context.
+**/.env
+**/.env.local
+**/.env.*.local
+**/.env.production
+**/.env.development
+!**/.env.example

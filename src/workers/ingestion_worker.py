@@ -204,6 +204,7 @@ class IngestionWorker:
                     filename=job.filename,
                     tenant_id=job.tenant_id,
                     document_id=job.document_id,
+                    owner_id=job.requested_by, 
                 )
         except RETRYABLE_EXCEPTIONS as exc:
             await self._retry_or_fail_job(job=job, exc=exc, error_code=exc.__class__.__name__)

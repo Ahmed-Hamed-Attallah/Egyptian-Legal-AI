@@ -16,6 +16,20 @@ class DocumentUploadResponse(BaseModel):
     message: Optional[str] = None
     indexed: bool = False
     created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    # Visibility / ownership — drives the two-panel library UI.
+    owner_id: Optional[str] = None
+    scope: str = "private"
+    is_official: bool = False
+    title: Optional[str] = None
+    law_number: Optional[str] = None
+    law_year: Optional[str] = None
+
+
+class DocumentScopeUpdateRequest(BaseModel):
+    """Admin promotion/demotion between official corpus and private uploads."""
+    scope: str = Field(..., pattern="^(official|private)$")
 
 
 class DocumentCapabilitiesResponse(BaseModel):

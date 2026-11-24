@@ -1,0 +1,240 @@
+# =============================================================================
+# Egyptian Legal AI — full stack
+#
+#   docker compose --profile worker up -d --build
+#
+# Profiles
+#   default   postgres, qdrant, api, web          (WORKER_EMBEDDED=true)
+#   worker    adds the separate ingestion process (WORKER_EMBEDDED=false)
+#   cache     adds Redis — only useful once CACHE_ENABLED=true and the driver
+#             is installed. Currently dead config; kept behind a profile so it
+#             is not started by accident.
+#
+# Read this before changing anything: the depends_on health gates are the fix
+# for "requests appear in the log minutes after I sent them". Uvicorn's --reload
+# creates the listening socket in the reloader parent, so traffic arrives while
+# the 28 s BM25 build is still running. service_healthy removes that window.
+# =============================================================================
+
+name: mizan
+
+x-common-env: &common-env
+  APP_ENV: ${APP_ENV:-production}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  TIMEZONE: Africa/Cairo
+  PYTHONPATH: /app
+
+x-db-env: &db-env
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-legal_ai_user}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-egyptian_legal_ai}
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: ${POSTGRES_DB:-egyptian_legal_ai}
+  POSTGRES_USER: ${POSTGRES_USER:-legal_ai_user}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+
+x-qdrant-env: &qdrant-env
+  QDRANT_URL: http://qdrant:6333
+  QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+  QDRANT_COLLECTION: ${QDRANT_COLLECTION_NAME:-egyptian_legal}
+  QDRANT_COLLECTION_NAME: ${QDRANT_COLLECTION_NAME:-egyptian_legal}
+
+services:
+  # ------------------------------------------------------------------ postgres
+  postgres:
+    image: postgres:16-alpine
+    container_name: mizan-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-egyptian_legal_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-legal_ai_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # Arabic legal text — UTF-8 must be explicit, not inherited.
+      initdb: --encoding=UTF8 --locale=C.UTF-8
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      # Loopback only: lets you run psql/pgAdmin from the host without exposing 5432.
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-legal_ai_user} -d ${POSTGRES_DB:-egyptian_legal_ai}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [mizan]
+
+  # ------------------------------------------------------------------- qdrant
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: mizan-qdrant
+    restart: unless-stopped
+    environment:
+      # Set only if you actually want auth. Empty => local, unauthenticated.
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-}
+      # Storage is on an NVMe host disk; keep mmap on for speed.
+      QDRANT__STORAGE__ON_DISK_PAYLOAD: "true"
+    volumes:
+      - qdrant-data:/qdrant/storage
+      - qdrant-snapshots:/qdrant/snapshots
+    ports:
+      - "127.0.0.1:6333:6333"    # REST — dashboard/API from host
+      - "127.0.0.1:6334:6334"    # gRPC
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:6333/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [mizan]
+
+  # ----------------------------------------------------------------------- api
+  api:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile.api
+      args:
+        INSTALL_OCR: ${INSTALL_OCR:-0}
+    image: mizan-api:latest
+    container_name: mizan-api
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      <<: [*common-env, *db-env, *qdrant-env]
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      API_PREFIX: /api/v1
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
+      MIGRATE_STRICT: "1"
+      # Same-origin behind nginx => preflights never fire.
+      CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost}
+      CORS_ALLOW_ORIGIN_REGEX: ""
+      # The worker runs as its own service under --profile worker.
+      WORKER_EMBEDDED: ${WORKER_EMBEDDED_COMPOSE:-false}
+      WORKER_ENABLED: "true"
+      DOCUMENT_STORAGE_DIR: /app/data/documents
+      LOG_DIR: /app/logs
+      # OCR is not in the image unless INSTALL_OCR=1.
+      OCR_ENABLED: ${OCR_ENABLED:-false}
+      # Local 3B model does not fit in 4 GB VRAM and is slow on CPU. Disabled
+      # by default; retrieval + Groq only. See docs/TECH_STACK.md.
+      LOCAL_MODEL_NAME: ${LOCAL_MODEL_NAME:-}
+      LLM_FALLBACK_ORDER: ${LLM_FALLBACK_ORDER:-}
+    volumes:
+      # Upload bytes MUST survive container restarts: a queued job references
+      # data/documents/<tenant>/<doc>/source.* and data/documents/jobs/<tenant>/<job>/.
+      - ./data/documents:/app/data/documents
+      - ./data/raw:/app/data/raw:ro
+      - hf-cache:/models
+      - ./logs:/app/logs
+      - ./artifacts:/app/artifacts
+    ports:
+      - "127.0.0.1:8000:8000"   # host debugging only; nginx is the public path
+    depends_on:
+      postgres: {condition: service_healthy}
+      qdrant:   {condition: service_healthy}
+    networks: [mizan]
+
+  # ----------------------------------------------------------------- ingestion
+  # Owns CPU-bound work: parsing, Arabic normalization, legal chunking,
+  # embedding, Qdrant writes. Separated from the API so a 50 MB PDF cannot add
+  # seconds to a user's chat answer.
+  worker:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile.worker
+      args:
+        INSTALL_OCR: ${INSTALL_OCR:-0}
+    image: mizan-worker:latest
+    container_name: mizan-worker
+    restart: unless-stopped
+    profiles: [worker]
+    env_file: [.env]
+    environment:
+      <<: [*common-env, *db-env, *qdrant-env]
+      WORKER_ENABLED: "true"
+      WORKER_EMBEDDED: "false"
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-2}
+      WORKER_JOB_TIMEOUT_SECONDS: ${WORKER_JOB_TIMEOUT_SECONDS:-900}
+      WORKER_MAX_RETRIES: ${WORKER_MAX_RETRIES:-2}
+      WORKER_RECLAIM_STALE_AFTER_SECONDS: ${WORKER_RECLAIM_STALE_AFTER_SECONDS:-600}
+      WORKER_JOB_STORE: sql
+      DOCUMENT_STORAGE_DIR: /app/data/documents
+      LOG_DIR: /app/logs
+      OCR_ENABLED: ${OCR_ENABLED:-false}
+      LOCAL_MODEL_NAME: ${LOCAL_MODEL_NAME:-}
+    volumes:
+      # Same paths, same uid (10001) as the API — the worker reads files the API wrote.
+      - ./data/documents:/app/data/documents
+      - ./data/raw:/app/data/raw:ro
+      - hf-cache:/models
+      - ./logs:/app/logs
+      - ./artifacts:/app/artifacts
+    depends_on:
+      postgres: {condition: service_healthy}
+      qdrant:   {condition: service_healthy}
+      api:      {condition: service_healthy}   # schema migrated before we poll jobs
+    networks: [mizan]
+
+  # ----------------------------------------------------------------------- web
+    # ----------------------------------------------------------------------- web
+  web:
+    build:
+      # Repo ROOT, not ./web — the Dockerfile copies with a `web/` prefix.
+      # This also lets the root .dockerignore filter node_modules/.next.
+      context: .
+      dockerfile: deployment/docker/Dockerfile.frontend
+      args:
+        # Same-origin: the browser hits web, Next.js rewrites to the API.
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/api/v1}
+        # CRITICAL: rewrites are resolved at BUILD time and baked into
+        # routes-manifest.json. A runtime-only BACKEND_URL is ignored, and the
+        # image would proxy to 127.0.0.1:8000 = the web container itself.
+        BACKEND_URL: http://api:8000
+        NEXT_PUBLIC_AUTH_DISABLED: "false"
+        NEXT_PUBLIC_POLL_INTERVAL_MS: "8000"
+        NEXT_PUBLIC_HEALTH_POLL_INTERVAL_MS: "30000"
+        NEXT_PUBLIC_API_MAX_CONCURRENCY: "4"
+    image: mizan-web:latest
+    container_name: mizan-web
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://api:8000
+      NODE_ENV: production
+    ports:
+      - "${PUBLIC_PORT:-80}:3000"
+    depends_on:
+      api: {condition: service_healthy}
+    networks: [mizan]
+
+  # --------------------------------------------------------------------- redis
+  # Optional. CACHE_ENABLED is false and the redis driver is not installed, so
+  # nothing reads this. Add it only when you implement answer/embedding caching.
+  redis:
+    image: redis:7-alpine
+    container_name: mizan-redis
+    restart: unless-stopped
+    profiles: [cache]
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks: [mizan]
+
+volumes:
+  postgres-data:
+  qdrant-data:
+  qdrant-snapshots:
+  # Shared by api + worker so models download once, not twice.
+  hf-cache:
+  redis-data:
+
+networks:
+  mizan:
+    driver: bridge

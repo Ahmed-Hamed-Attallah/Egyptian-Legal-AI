@@ -92,7 +92,6 @@ def discover_input_files() -> List[Path]:
     """
     raw_dirs = [
         settings.DATA_DIR / "raw" / "official_laws",
-        settings.DATA_DIR / "processed",
     ]
     discovered = {}
     for directory in raw_dirs:

@@ -1,0 +1,112 @@
+# syntax=docker/dockerfile:1.6
+# =============================================================================
+# Egyptian Legal AI — FastAPI image
+#
+# Build:  docker build -f deployment/docker/Dockerfile.api -t mizan-api .
+#
+# Build args
+#   INSTALL_OCR=0   PaddleOCR is ~1.2 GB and drags heavy system libs. Off by
+#                   default. If you leave it off you MUST set OCR_ENABLED=false,
+#                   otherwise scanned-PDF ingestion fails at runtime.
+#
+# Notes
+#   * torch is installed from the CPU wheel index BEFORE requirements.txt, so the
+#     CUDA build is never pulled. Your P2000 is 4 GB Pascal (sm_61): bitsandbytes
+#     4-bit needs Turing+, and Qwen2.5-3B in bf16 needs ~6 GB. GPU inference for
+#     the local LLM is genuinely not viable here — this is a hardware fact, not a
+#     configuration preference.
+#   * Models are NOT baked in. They live in the hf-cache volume so the image stays
+#     ~1.5 GB instead of ~8 GB, and startup downloads once per host.
+# =============================================================================
+
+FROM python:3.11-slim-bookworm AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# libmariadb3: pandas/SQLAlchemy MySQL parity, harmless on Postgres-only builds.
+# libglib2.0-0/libgl1: required by OpenCV, which PaddleOCR imports transitively.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        libglib2.0-0 \
+        libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+ARG INSTALL_OCR=0
+
+# CPU torch first — requirements.txt's hardware-specific section then sees it satisfied.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --index-url https://download.pytorch.org/whl/cpu \
+        "torch>=2.4.0" "torchaudio>=2.4.0"
+
+COPY requirements.txt pyproject.toml ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
+
+# Optional OCR layer, isolated so the default image stays lean.
+RUN if [ "$INSTALL_OCR" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends libsm6 libxext6 \
+            && rm -rf /var/lib/apt/lists/* \
+            && pip install "paddlepaddle>=2.6.0" "paddleocr>=2.9.0"; \
+    fi
+
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim-bookworm AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    # Models + tokeniser caches resolve to the mounted volume, never /root.
+    HF_HOME=/models \
+    SENTENCE_TRANSFORMERS_HOME=/models \
+    TRANSFORMERS_CACHE=/models \
+    HUGGINGFACE_HUB_CACHE=/models \
+    TOKENIZERS_PARALLELISM=false \
+    # 12 cores available but three CPU models contend. 2 is the measured sweet spot.
+    OMP_NUM_THREADS=2 \
+    MKL_NUM_THREADS=2 \
+    OPENBLAS_NUM_THREADS=2 \
+    # Alembic config lives under src/, not the project root.
+    ALEMBIC_CONFIG=src/storage/database/migrations/alembic.ini \
+    PYTHONPATH=/app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl libglib2.0-0 libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root. Uploads land in /app/data, which is bind-mounted — ownership matters.
+RUN groupadd --gid 10001 mizan && useradd --uid 10001 --gid mizan --create-home mizan
+
+WORKDIR /app
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+COPY --chown=mizan:mizan api ./api
+COPY --chown=mizan:mizan src ./src
+COPY --chown=mizan:mizan workers ./workers
+COPY --chown=mizan:mizan scripts ./scripts
+COPY --chown=mizan:mizan pyproject.toml requirements.txt ./
+
+RUN mkdir -p /app/data/documents /app/logs /app/artifacts \
+    && chown -R mizan:mizan /app/data /app/logs /app/artifacts /models
+
+USER mizan
+EXPOSE 8000
+
+# Entrypoint migrates before serving. This is what prevents the schema/model
+# drift that produced "No 'script_location' key found" and the missing scope column.
+COPY --chown=mizan:mizan deployment/docker/entrypoint.api.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=5 \
+    CMD curl -fsS http://127.0.0.1:8000/health/live || exit 1
+
+CMD ["/usr/local/bin/entrypoint.sh"]
